@@ -41,7 +41,7 @@ var PRESS_RETENTION_OFFSET = {top: 20, left: 20, right: 20, bottom: 30};
  *     <TouchableOpacity onPress={this._onPressButton}>
  *       <Image
  *         style={styles.button}
- *         source={require('image!myButton')}
+ *         source={require('./myButton.png')}
  *       />
  *     </TouchableOpacity>
  *   );
@@ -87,7 +87,7 @@ var TouchableOpacity = React.createClass({
   setOpacityTo: function(value: number) {
     Animated.timing(
       this.state.anim,
-      {toValue: value, duration: 150}
+      {toValue: value, duration: 150, useNativeDriver: true}
     ).start();
   },
 
@@ -160,7 +160,7 @@ var TouchableOpacity = React.createClass({
   render: function() {
     return (
       <Animated.View
-        accessible={true}
+        accessible={this.props.accessible !== false}
         accessibilityLabel={this.props.accessibilityLabel}
         accessibilityComponentType={this.props.accessibilityComponentType}
         accessibilityTraits={this.props.accessibilityTraits}

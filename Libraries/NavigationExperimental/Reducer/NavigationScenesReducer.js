@@ -12,6 +12,7 @@
 'use strict';
 
 const invariant = require('fbjs/lib/invariant');
+const shallowEqual = require('fbjs/lib/shallowEqual');
 
 import type {
   NavigationRoute,
@@ -55,6 +56,9 @@ function compareScenes(
   );
 }
 
+/**
+ * Whether two routes are the same.
+ */
 function areScenesShallowEqual(
   one: NavigationScene,
   two: NavigationScene,
@@ -63,8 +67,27 @@ function areScenesShallowEqual(
     one.key === two.key &&
     one.index === two.index &&
     one.isStale === two.isStale &&
-    one.route.key === two.route.key
+    one.isActive === two.isActive &&
+    areRoutesShallowEqual(one.route, two.route)
   );
+}
+
+/**
+ * Whether two routes are the same.
+ */
+function areRoutesShallowEqual(
+  one: ?NavigationRoute,
+  two: ?NavigationRoute,
+): boolean {
+  if (!one || !two) {
+    return one === two;
+  }
+
+  if (one.key !== two.key) {
+    return false;
+  }
+
+  return shallowEqual(one, two);
 }
 
 function NavigationScenesReducer(
@@ -94,13 +117,14 @@ function NavigationScenesReducer(
     const key = SCENE_KEY_PREFIX + route.key;
     const scene = {
       index,
+      isActive: false,
       isStale: false,
       key,
       route,
     };
     invariant(
       !nextKeys.has(key),
-      `navigationState.routes[${index}].key "${key}" conflicts with` +
+      `navigationState.routes[${index}].key "${key}" conflicts with ` +
         'another route!'
     );
     nextKeys.add(key);
@@ -122,6 +146,7 @@ function NavigationScenesReducer(
       }
       staleScenes.set(key, {
         index,
+        isActive: false,
         isStale: true,
         key,
         route,
@@ -147,6 +172,26 @@ function NavigationScenesReducer(
   freshScenes.forEach(mergeScene);
 
   nextScenes.sort(compareScenes);
+
+  let activeScenesCount = 0;
+  nextScenes.forEach((scene, ii) => {
+    const isActive = !scene.isStale && scene.index === nextState.index;
+    if (isActive !== scene.isActive) {
+      nextScenes[ii] = {
+        ...scene,
+        isActive,
+      };
+    }
+    if (isActive) {
+      activeScenesCount++;
+    }
+  });
+
+  invariant(
+    activeScenesCount === 1,
+    'there should always be only one scene active, not %s.',
+    activeScenesCount,
+  );
 
   if (nextScenes.length !== scenes.length) {
     return nextScenes;
