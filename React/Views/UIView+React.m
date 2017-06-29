@@ -15,13 +15,6 @@
 #import "RCTLog.h"
 #import "RCTShadowView.h"
 
-@interface RCTWeakObjectContainer : NSObject
-@property (nonatomic, weak) id object;
-@end
-
-@implementation RCTWeakObjectContainer
-@end
-
 @implementation UIView (React)
 
 - (NSNumber *)reactTag
@@ -34,16 +27,14 @@
   objc_setAssociatedObject(self, @selector(reactTag), reactTag, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-- (UIView *)reactSuperview
+- (NSNumber *)nativeID
 {
-  return [(RCTWeakObjectContainer *)objc_getAssociatedObject(self, @selector(reactSuperview)) object];
+  return objc_getAssociatedObject(self, _cmd);
 }
 
-- (void)setReactSuperview:(UIView *)reactSuperview
+- (void)setNativeID:(NSNumber *)nativeID
 {
-  RCTWeakObjectContainer *wrapper = [RCTWeakObjectContainer new];
-  wrapper.object = reactSuperview;
-  objc_setAssociatedObject(self, @selector(reactSuperview), wrapper, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  objc_setAssociatedObject(self, @selector(nativeID), nativeID, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 #if RCT_DEV
@@ -80,6 +71,11 @@
   return objc_getAssociatedObject(self, _cmd);
 }
 
+- (UIView *)reactSuperview
+{
+  return self.superview;
+}
+
 - (void)insertReactSubview:(UIView *)subview atIndex:(NSInteger)atIndex
 {
   // We access the associated object directly here in case someone overrides
@@ -90,7 +86,6 @@
     objc_setAssociatedObject(self, @selector(reactSubviews), subviews, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   }
   [subviews insertObject:subview atIndex:atIndex];
-  [subview setReactSuperview:self];
 }
 
 - (void)removeReactSubview:(UIView *)subview
@@ -100,54 +95,79 @@
   NSMutableArray *subviews = objc_getAssociatedObject(self, @selector(reactSubviews));
   [subviews removeObject:subview];
   [subview removeFromSuperview];
-  [subview setReactSuperview:nil];
 }
+
+#pragma mark - Display
+
+- (YGDisplay)reactDisplay
+{
+  return self.isHidden ? YGDisplayNone : YGDisplayFlex;
+}
+
+- (void)setReactDisplay:(YGDisplay)display
+{
+  self.hidden = display == YGDisplayNone;
+}
+
+#pragma mark - Layout Direction
+
+- (UIUserInterfaceLayoutDirection)reactLayoutDirection
+{
+  if ([self respondsToSelector:@selector(semanticContentAttribute)]) {
+    return [UIView userInterfaceLayoutDirectionForSemanticContentAttribute:self.semanticContentAttribute];
+  } else {
+    return [objc_getAssociatedObject(self, @selector(reactLayoutDirection)) integerValue];
+  }
+}
+
+- (void)setReactLayoutDirection:(UIUserInterfaceLayoutDirection)layoutDirection
+{
+  if ([self respondsToSelector:@selector(setSemanticContentAttribute:)]) {
+    self.semanticContentAttribute =
+      layoutDirection == UIUserInterfaceLayoutDirectionLeftToRight ?
+        UISemanticContentAttributeForceLeftToRight :
+        UISemanticContentAttributeForceRightToLeft;
+  } else {
+    objc_setAssociatedObject(self, @selector(reactLayoutDirection), @(layoutDirection), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+}
+
+#pragma mark - zIndex
 
 - (NSInteger)reactZIndex
 {
-  return [objc_getAssociatedObject(self, _cmd) integerValue];
+  return self.layer.zPosition;
 }
 
 - (void)setReactZIndex:(NSInteger)reactZIndex
 {
-  objc_setAssociatedObject(self, @selector(reactZIndex), @(reactZIndex), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  self.layer.zPosition = reactZIndex;
 }
 
-- (NSArray<UIView *> *)sortedReactSubviews
+- (NSArray<UIView *> *)reactZIndexSortedSubviews
 {
-  NSArray *subviews = objc_getAssociatedObject(self, _cmd);
-  if (!subviews) {
-    // Check if sorting is required - in most cases it won't be
-    BOOL sortingRequired = NO;
-    for (UIView *subview in self.reactSubviews) {
-      if (subview.reactZIndex != 0) {
-        sortingRequired = YES;
-        break;
-      }
+  // Check if sorting is required - in most cases it won't be.
+  BOOL sortingRequired = NO;
+  for (UIView *subview in self.subviews) {
+    if (subview.reactZIndex != 0) {
+      sortingRequired = YES;
+      break;
     }
-    subviews = sortingRequired ? [self.reactSubviews sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-      if (a.reactZIndex > b.reactZIndex) {
-        return NSOrderedDescending;
-      } else {
-        // ensure sorting is stable by treating equal zIndex as ascending so
-        // that original order is preserved
-        return NSOrderedAscending;
-      }
-    }] : self.reactSubviews;
-    objc_setAssociatedObject(self, _cmd, subviews, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   }
-  return subviews;
-}
-
-// private method, used to reset sort
-- (void)clearSortedSubviews
-{
-  objc_setAssociatedObject(self, @selector(sortedReactSubviews), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  return sortingRequired ? [self.reactSubviews sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+    if (a.reactZIndex > b.reactZIndex) {
+      return NSOrderedDescending;
+    } else {
+      // Ensure sorting is stable by treating equal zIndex as ascending so
+      // that original order is preserved.
+      return NSOrderedAscending;
+    }
+  }] : self.subviews;
 }
 
 - (void)didUpdateReactSubviews
 {
-  for (UIView *subview in self.sortedReactSubviews) {
+  for (UIView *subview in self.reactSubviews) {
     [self addSubview:subview];
   }
 }
@@ -207,196 +227,72 @@
 }
 
 /**
- * Responder overrides - to be deprecated.
+ * Focus manipulation.
  */
-- (void)reactWillMakeFirstResponder {};
-- (void)reactDidMakeFirstResponder {};
-- (BOOL)reactRespondsToTouch:(__unused UITouch *)touch
+- (BOOL)reactIsFocusNeeded
 {
-  return YES;
+  return [(NSNumber *)objc_getAssociatedObject(self, @selector(reactIsFocusNeeded)) boolValue];
 }
 
-#pragma mark - view clipping
-
-/**
- * How does view clipping works?
- *
- * Each view knows if it has clipping turned on and its closest ancestor that has clipping turned on (if any). That helps with effective clipping evaluation.
-
- * There are four standard cases when we have to evaluate view clipping:
- * 1. a view has clipping turned off:
- *    - we have to update NCV for its complete subtree
- *    - we have to add back all clipped views
- * 2. a view has clipping turned on:
- *    - we have to update NCV for its complete subtree
- *    - we have to reclip it
- * 3. a react subview is added:
- *    - we have to set it and all its subviews NCV
- *    - if it has NVC or clipping turned on we have to reclip it
- * 4. a view is moved (new frame, tranformation, is a cell in a scrolling scrollview):
- *    - if it has NCV or clipping turned on we have to reclip it
- */
-
-- (BOOL)rct_removesClippedSubviews
+- (void)setReactIsFocusNeeded:(BOOL)isFocusNeeded
 {
-  return [objc_getAssociatedObject(self, @selector(rct_removesClippedSubviews)) boolValue];
+  objc_setAssociatedObject(self, @selector(reactIsFocusNeeded), @(isFocusNeeded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-- (void)rct_setRemovesClippedSubviews:(BOOL)removeClippedSubviews
-{
-  objc_setAssociatedObject(self, @selector(rct_removesClippedSubviews), @(removeClippedSubviews), OBJC_ASSOCIATION_ASSIGN);
-  [self rct_updateSubviewsWithNextClippingView:removeClippedSubviews ? self : nil];
-  if (removeClippedSubviews) {
-    [self rct_reclip];
+- (void)reactFocus {
+  if (![self becomeFirstResponder]) {
+    self.reactIsFocusNeeded = YES;
   }
 }
 
-
-/**
- * Returns a closest ancestor view which has view clipping turned on.
- * `nil` is returned if there is no such view.
- */
-- (UIView *)rct_nextClippingView
-{
-  return [(RCTWeakObjectContainer *)objc_getAssociatedObject(self, @selector(rct_nextClippingView)) object];
-}
-
-- (void)rct_setNextClippingView:(UIView *)rct_nextClippingView
-{
-  RCTAssert(self != rct_nextClippingView, @"A view cannot be next clipping view for itself.");
-  RCTWeakObjectContainer *wrapper = [RCTWeakObjectContainer new];
-  wrapper.object = rct_nextClippingView;
-  objc_setAssociatedObject(self, @selector(rct_nextClippingView), wrapper, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-/**
- * Reevaluates clipping for itself and recursively for its subviews,
- * going as deep as the first clipped subview is.
- *
- * It works like this:
- * 1/ Is any of our ancestores already clipped? If yes lets do nothing.
- * 2/ Get clipping rect that applies here.
- * 3/ Does our bounds intersect with the rect? If no clip ourself and we are done.
- * 4/ If there is an intersection make sure we are not clipped and recurse into subviews.
- *
- * We do 1/ and 2/ in one step by retrieving "active clip rect" (see method `activeClipRect`).
- */
-- (void)rct_reclip
-{
-  // If we are not clipping or have a view that clips us there is nothing to do.
-  if (!self.rct_nextClippingView && !self.rct_removesClippedSubviews) {
-    return;
-  }
-  // If we are currently clipped our active clipping rect would be null rect. That's why we ask for out superview's.
-  CGRect clippingRectForSuperview = self.reactSuperview ? [self.reactSuperview rct_activeClippingRect] : CGRectInfinite;
-  if (CGRectIsNull(clippingRectForSuperview)) {
-    return;
-  }
-
-  if (!CGRectIntersectsRect(self.frame, clippingRectForSuperview)) {
-    // we are clipped
-    clipView(self);
-  } else {
-    // we are not clipped
-    if (!self.superview) {
-      // We need to make sure we keep zIndex ordering when adding back a clipped view.
-      NSUInteger position = 0;
-      for (UIView *view in self.reactSuperview.sortedReactSubviews) {
-        if (view.superview) {
-          position += 1;
-        }
-        if (view == self) {
-          break;
-        }
-      }
-      [self.reactSuperview insertSubview:self atIndex:position];
-    }
-    // Potential optimisation: We don't have to reevaluate clipping for subviews if the whole view was visible before and is still visible now.
-    CGRect clipRect = [self convertRect:clippingRectForSuperview fromView:self.superview];
-    [self rct_clipSubviewsWithAncestralClipRect:clipRect];
-  }
-}
-
-/**
- * This is not the same as `reclip`, since we reevaluate clipping for all subviews at once.
- * It enables us to insert the not clipped ones into right position effectively.
- */
-- (void)rct_clipSubviewsWithAncestralClipRect:(CGRect)clipRect
-{
-  UIView *lastSubview = nil;
-  if (self.rct_removesClippedSubviews) {
-    clipRect = CGRectIntersection(clipRect, self.bounds);
-  }
-  for (UIView *subview in self.sortedReactSubviews) {
-    if (CGRectIntersectsRect(subview.frame, clipRect)) {
-      if (!subview.superview) {
-        if (lastSubview) {
-          [self insertSubview:subview aboveSubview:lastSubview];
-        } else {
-          [self insertSubview:subview atIndex:0];
-        }
-      }
-      lastSubview = subview;
-      [subview rct_clipSubviewsWithAncestralClipRect:[self convertRect:clipRect toView:subview]];
-    } else {
-      clipView(subview);
+- (void)reactFocusIfNeeded {
+  if (self.reactIsFocusNeeded) {
+    if ([self becomeFirstResponder]) {
+      self.reactIsFocusNeeded = NO;
     }
   }
 }
 
-static void clipView(UIView *view)
-{
-  // we are clipped
-  if (view.superview) {
-    // We don't clip if react hierarchy doesn't match uiview hierarchy, since we could get into inconsistent state.
-    if (view.reactSuperview == view.superview) {
-      [view removeFromSuperview];
-    }
-  }
+- (void)reactBlur {
+  [self resignFirstResponder];
 }
 
-/**
- * If this view is not clipped:
- * Returns a rect that is used to clip this view, in the view's coordinate space.
- * If this view has clipping turned on it's bounds are accounted for in the returned clipping rect.
- *
- * Returns CGRectNull if this view is clipped or none of its ancestors has clipping turned on.
- */
-- (CGRect)rct_activeClippingRect
+#pragma mark - Layout
+
+- (UIEdgeInsets)reactBorderInsets
 {
-  UIView *clippingParent = self.rct_nextClippingView;
-  CGRect resultRect = CGRectInfinite;
-
-  if (clippingParent) {
-    if (![self isDescendantOfView:clippingParent]) {
-      return CGRectNull;
-    }
-    resultRect = [self convertRect:[clippingParent rct_activeClippingRect] fromView:clippingParent];
-  }
-
-  if (self.rct_removesClippedSubviews) {
-    resultRect = CGRectIntersection(resultRect, self.bounds);
-  }
-
-  return resultRect;
+  CGFloat borderWidth = self.layer.borderWidth;
+  return UIEdgeInsetsMake(borderWidth, borderWidth, borderWidth, borderWidth);
 }
 
-/**
- * Sets the next clipping view for all subviews if they are not already being clipped, recursively.
- * Using a `nil` clipping view will result in adding clipped subviews back.
- */
-- (void)rct_updateSubviewsWithNextClippingView:(UIView *)clippingView
+- (UIEdgeInsets)reactPaddingInsets
 {
-  for (UIView *subview in self.sortedReactSubviews) {
-    if (!clippingView) {
-      [self addSubview:subview];
-    }
-    [subview rct_setNextClippingView:clippingView];
-    // We don't have to recurse if the subview either clips itself or it already has correct next clipping view set.
-    if (!subview.rct_removesClippedSubviews && !(subview.rct_nextClippingView == clippingView)) {
-      [subview rct_updateSubviewsWithNextClippingView:clippingView];
-    }
-  }
+  return UIEdgeInsetsZero;
+}
+
+- (UIEdgeInsets)reactCompoundInsets
+{
+  UIEdgeInsets borderInsets = self.reactBorderInsets;
+  UIEdgeInsets paddingInsets = self.reactPaddingInsets;
+
+  return UIEdgeInsetsMake(
+    borderInsets.top + paddingInsets.top,
+    borderInsets.left + paddingInsets.left,
+    borderInsets.bottom + paddingInsets.bottom,
+    borderInsets.right + paddingInsets.right
+  );
+}
+
+- (CGRect)reactContentFrame
+{
+  return UIEdgeInsetsInsetRect(self.bounds, self.reactCompoundInsets);
+}
+
+#pragma mark - Accessiblity
+
+- (UIView *)reactAccessibilityElement
+{
+  return self;
 }
 
 @end

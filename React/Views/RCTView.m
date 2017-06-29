@@ -15,19 +15,83 @@
 #import "RCTLog.h"
 #import "RCTUtils.h"
 #import "UIView+React.h"
-#import "UIView+Private.h"
 
+@implementation UIView (RCTViewUnmounting)
+
+- (void)react_remountAllSubviews
+{
+  // Normal views don't support unmounting, so all
+  // this does is forward message to our subviews,
+  // in case any of those do support it
+
+  for (UIView *subview in self.subviews) {
+    [subview react_remountAllSubviews];
+  }
+}
+
+- (void)react_updateClippedSubviewsWithClipRect:(CGRect)clipRect relativeToView:(UIView *)clipView
+{
+  // Even though we don't support subview unmounting
+  // we do support clipsToBounds, so if that's enabled
+  // we'll update the clipping
+
+  if (self.clipsToBounds && self.subviews.count > 0) {
+    clipRect = [clipView convertRect:clipRect toView:self];
+    clipRect = CGRectIntersection(clipRect, self.bounds);
+    clipView = self;
+  }
+
+  // Normal views don't support unmounting, so all
+  // this does is forward message to our subviews,
+  // in case any of those do support it
+
+  for (UIView *subview in self.subviews) {
+    [subview react_updateClippedSubviewsWithClipRect:clipRect relativeToView:clipView];
+  }
+}
+
+- (UIView *)react_findClipView
+{
+  UIView *testView = self;
+  UIView *clipView = nil;
+  CGRect clipRect = self.bounds;
+  // We will only look for a clipping view up the view hierarchy until we hit the root view.
+  while (testView) {
+    if (testView.clipsToBounds) {
+      if (clipView) {
+        CGRect testRect = [clipView convertRect:clipRect toView:testView];
+        if (!CGRectContainsRect(testView.bounds, testRect)) {
+          clipView = testView;
+          clipRect = CGRectIntersection(testView.bounds, testRect);
+        }
+      } else {
+        clipView = testView;
+        clipRect = [self convertRect:self.bounds toView:clipView];
+      }
+    }
+    if ([testView isReactRootView]) {
+      break;
+    }
+    testView = testView.superview;
+  }
+  return clipView ?: self.window;
+}
+
+@end
 
 static NSString *RCTRecursiveAccessibilityLabel(UIView *view)
 {
   NSMutableString *str = [NSMutableString stringWithString:@""];
   for (UIView *subview in view.subviews) {
     NSString *label = subview.accessibilityLabel;
-    if (label) {
-      [str appendString:@" "];
+    if (!label) {
+      label = RCTRecursiveAccessibilityLabel(subview);
+    }
+    if (label && label.length > 0) {
+      if (str.length > 0) {
+        [str appendString:@" "];
+      }
       [str appendString:label];
-    } else {
-      [str appendString:RCTRecursiveAccessibilityLabel(subview)];
     }
   }
   return str;
@@ -37,8 +101,6 @@ static NSString *RCTRecursiveAccessibilityLabel(UIView *view)
 {
   UIColor *_backgroundColor;
 }
-
-@synthesize reactZIndex = _reactZIndex;
 
 - (instancetype)initWithFrame:(CGRect)frame
 {
@@ -62,6 +124,18 @@ static NSString *RCTRecursiveAccessibilityLabel(UIView *view)
 }
 
 RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:unused)
+
+- (void)setReactLayoutDirection:(UIUserInterfaceLayoutDirection)layoutDirection
+{
+  _reactLayoutDirection = layoutDirection;
+
+  if ([self respondsToSelector:@selector(setSemanticContentAttribute:)]) {
+    self.semanticContentAttribute =
+      layoutDirection == UIUserInterfaceLayoutDirectionLeftToRight ?
+        UISemanticContentAttributeForceLeftToRight :
+        UISemanticContentAttributeForceRightToLeft;
+  }
+}
 
 - (NSString *)accessibilityLabel
 {
@@ -93,13 +167,16 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:unused)
   BOOL isPointInside = [self pointInside:point withEvent:event];
   BOOL needsHitSubview = !(_pointerEvents == RCTPointerEventsNone || _pointerEvents == RCTPointerEventsBoxOnly);
   if (needsHitSubview && (![self clipsToBounds] || isPointInside)) {
+    // Take z-index into account when calculating the touch target.
+    NSArray<UIView *> *sortedSubviews = [self reactZIndexSortedSubviews];
+
     // The default behaviour of UIKit is that if a view does not contain a point,
     // then no subviews will be returned from hit testing, even if they contain
     // the hit point. By doing hit testing directly on the subviews, we bypass
     // the strict containment policy (i.e., UIKit guarantees that every ancestor
     // of the hit view will return YES from -pointInside:withEvent:). See:
     //  - https://developer.apple.com/library/ios/qa/qa2013/qa1812.html
-    for (UIView *subview in [self.subviews reverseObjectEnumerator]) {
+    for (UIView *subview in [sortedSubviews reverseObjectEnumerator]) {
       CGPoint convertedPoint = [subview convertPoint:point fromView:self];
       hitSubview = [subview hitTest:convertedPoint withEvent:event];
       if (hitSubview != nil) {
@@ -134,6 +211,20 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:unused)
   return CGRectContainsPoint(hitFrame, point);
 }
 
+- (UIView *)reactAccessibilityElement
+{
+  return self;
+}
+
+- (BOOL)isAccessibilityElement
+{
+  if (self.reactAccessibilityElement == self) {
+    return [super isAccessibilityElement];
+  }
+
+  return NO;
+}
+
 - (BOOL)accessibilityActivate
 {
   if (_onAccessibilityTap) {
@@ -151,22 +242,6 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:unused)
     return YES;
   } else {
     return NO;
-  }
-}
-
-- (void)didUpdateReactSubviews
-{
-  if (!self.rct_nextClippingView && !self.rct_removesClippedSubviews) {
-    [super didUpdateReactSubviews];
-    return;
-  }
-
-  UIView *rct_nextClippingViewForSubviews = self.rct_removesClippedSubviews ? self : self.rct_nextClippingView;
-  [self rct_updateSubviewsWithNextClippingView:rct_nextClippingViewForSubviews];
-
-  CGRect clippingRect = [self rct_activeClippingRect];
-  if (!CGRectIsNull(clippingRect)) {
-    [self rct_clipSubviewsWithAncestralClipRect:clippingRect];
   }
 }
 
@@ -224,6 +299,113 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:unused)
     view = view.superview;
   }
   return UIEdgeInsetsZero;
+}
+
+#pragma mark - View unmounting
+
+- (void)react_remountAllSubviews
+{
+  if (_removeClippedSubviews) {
+    for (UIView *view in self.reactSubviews) {
+      if (view.superview != self) {
+        [self addSubview:view];
+        [view react_remountAllSubviews];
+      }
+    }
+  } else {
+    // If _removeClippedSubviews is false, we must already be showing all subviews
+    [super react_remountAllSubviews];
+  }
+}
+
+- (void)react_updateClippedSubviewsWithClipRect:(CGRect)clipRect relativeToView:(UIView *)clipView
+{
+  // TODO (#5906496): for scrollviews (the primary use-case) we could
+  // optimize this by only doing a range check along the scroll axis,
+  // instead of comparing the whole frame
+
+  if (!_removeClippedSubviews) {
+    // Use default behavior if unmounting is disabled
+    return [super react_updateClippedSubviewsWithClipRect:clipRect relativeToView:clipView];
+  }
+
+  if (self.reactSubviews.count == 0) {
+    // Do nothing if we have no subviews
+    return;
+  }
+
+  if (CGSizeEqualToSize(self.bounds.size, CGSizeZero)) {
+    // Do nothing if layout hasn't happened yet
+    return;
+  }
+
+  // Convert clipping rect to local coordinates
+  clipRect = [clipView convertRect:clipRect toView:self];
+  clipRect = CGRectIntersection(clipRect, self.bounds);
+  clipView = self;
+
+  // Mount / unmount views
+  for (UIView *view in self.reactSubviews) {
+    if (!CGRectIsEmpty(CGRectIntersection(clipRect, view.frame))) {
+
+      // View is at least partially visible, so remount it if unmounted
+      [self addSubview:view];
+
+      // Then test its subviews
+      if (CGRectContainsRect(clipRect, view.frame)) {
+        // View is fully visible, so remount all subviews
+        [view react_remountAllSubviews];
+      } else {
+        // View is partially visible, so update clipped subviews
+        [view react_updateClippedSubviewsWithClipRect:clipRect relativeToView:clipView];
+      }
+
+    } else if (view.superview) {
+
+      // View is completely outside the clipRect, so unmount it
+      [view removeFromSuperview];
+    }
+  }
+}
+
+- (void)setRemoveClippedSubviews:(BOOL)removeClippedSubviews
+{
+  if (!removeClippedSubviews && _removeClippedSubviews) {
+    [self react_remountAllSubviews];
+  }
+  _removeClippedSubviews = removeClippedSubviews;
+}
+
+- (void)didUpdateReactSubviews
+{
+  if (_removeClippedSubviews) {
+    [self updateClippedSubviews];
+  } else {
+    [super didUpdateReactSubviews];
+  }
+}
+
+- (void)updateClippedSubviews
+{
+  // Find a suitable view to use for clipping
+  UIView *clipView = [self react_findClipView];
+  if (clipView) {
+    [self react_updateClippedSubviewsWithClipRect:clipView.bounds relativeToView:clipView];
+  }
+}
+
+- (void)layoutSubviews
+{
+  // TODO (#5906496): this a nasty performance drain, but necessary
+  // to prevent gaps appearing when the loading spinner disappears.
+  // We might be able to fix this another way by triggering a call
+  // to updateClippedSubviews manually after loading
+
+  [super layoutSubviews];
+
+  if (_removeClippedSubviews) {
+    [self updateClippedSubviews];
+  }
 }
 
 #pragma mark - Borders
@@ -297,9 +479,6 @@ RCT_NOT_IMPLEMENTED(- (instancetype)initWithCoder:unused)
   // TODO: detect up-front if re-rendering is necessary
   CGSize oldSize = self.bounds.size;
   [super reactSetFrame:frame];
-  // When the frame changes, our view needs to reclip itself with its parent,
-  // and also clip any of its own subviews if `rct_removesClippedSubviews` is turned on.
-  [self rct_reclip];
   if (!CGSizeEqualToSize(self.bounds.size, oldSize)) {
     [self.layer setNeedsDisplay];
   }
@@ -426,10 +605,10 @@ static void RCTUpdateShadowPathForView(RCTView *view)
       // Can't accurately calculate box shadow, so fall back to pixel-based shadow
       view.layer.shadowPath = nil;
 
-      RCTLogWarn(@"View #%@ of type %@ has a shadow set but cannot calculate "
-                 "shadow efficiently. Consider setting a background color to "
-                 "fix this, or apply the shadow to a more specific component.",
-                 view.reactTag, [view class]);
+      RCTLogAdvice(@"View #%@ of type %@ has a shadow set but cannot calculate "
+        "shadow efficiently. Consider setting a background color to "
+        "fix this, or apply the shadow to a more specific component.",
+        view.reactTag, [view class]);
     }
   }
 }

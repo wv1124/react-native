@@ -11,12 +11,9 @@
 
 @interface UIView (Private)
 
-// zIndex sorting
-- (void)clearSortedSubviews;
-
-- (CGRect)rct_activeClippingRect;
-- (UIView *)rct_nextClippingView;
-- (void)rct_updateSubviewsWithNextClippingView:(UIView *)clippingView;
-- (void)rct_clipSubviewsWithAncestralClipRect:(CGRect)clipRect;
+// remove clipped subviews implementation
+- (void)react_remountAllSubviews;
+- (void)react_updateClippedSubviewsWithClipRect:(CGRect)clipRect relativeToView:(UIView *)clipView;
+- (UIView *)react_findClipView;
 
 @end
